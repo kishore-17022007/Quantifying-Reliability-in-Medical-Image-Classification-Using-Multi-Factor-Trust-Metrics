@@ -1,0 +1,22 @@
+{
+  "accuracy": 0.8589743589743589,
+  "auc": 0.9273285119438965,
+  "f1": 0.8886075949367088,
+  "ece_before": 0.3044921811670065,
+  "ece_after": 0.18443166521879345,
+  "brier": 0.17131012548602542,
+  "avg_trust_score": 0.9918211102485657,
+  "temperature": 2.1096363067626953,
+  "decision_threshold": 0.82,
+  "best_val_f1": 0.8888888888888888,
+  "class_names": [
+    "NORMAL",
+    "PNEUMONIA"
+  ],
+  "best_model_path": "./artifacts/best_model.pt",
+  "ensemble_model_paths": [
+    "./artifacts/ensemble_model_seed_42.pt",
+    "./artifacts/ensemble_model_seed_123.pt",
+    "./artifacts/ensemble_model_seed_999.pt"
+  ]
+}

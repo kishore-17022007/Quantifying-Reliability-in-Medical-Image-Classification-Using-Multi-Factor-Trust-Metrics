@@ -1,5 +1,11 @@
 .venv/
 __pycache__/
 *.pyc
-artifacts/
+artifacts/*
+!artifacts/figures/
+artifacts/figures/*
+!artifacts/figures/reliability_after.png
+!artifacts/figures/roc_curve.png
+!artifacts/research_summary.json
+!artifacts/trust_analysis.csv
 .DS_Store
