@@ -42,9 +42,36 @@ Training and evaluation outputs are saved in `artifacts/`.
 
 ![ROC Curve](artifacts/figures/roc_curve.png)
 
+### Dashboard Screenshots
+
+#### Dashboard Example 1
+
+![Dashboard Example 1](assets/dashboard_example_1.png)
+
+#### Dashboard Example 2
+
+![Dashboard Example 2](assets/dashboard_example_2.png)
+
 ## Run
 
 ```bash
 python project/train.py --data_root "/path/to/chest_xray" --output_dir ./artifacts
 python -m streamlit run project/dashboard.py --server.port 8502
+```
+
+## Research Paper Draft (IEEE)
+
+The repository includes a publication-style IEEE conference draft:
+
+- [paper/ieee_paper.tex](paper/ieee_paper.tex)
+- [paper/references.bib](paper/references.bib)
+
+Compile locally (example):
+
+```bash
+cd paper
+pdflatex ieee_paper.tex
+bibtex ieee_paper
+pdflatex ieee_paper.tex
+pdflatex ieee_paper.tex
 ```

@@ -1,22 +1,58 @@
 {
-  "accuracy": 0.8589743589743589,
-  "auc": 0.9273285119438965,
-  "f1": 0.8886075949367088,
-  "ece_before": 0.3044921811670065,
-  "ece_after": 0.18443166521879345,
-  "brier": 0.17131012548602542,
-  "avg_trust_score": 0.9918211102485657,
-  "temperature": 2.1096363067626953,
-  "decision_threshold": 0.82,
+  "accuracy": 0.8830128205128205,
+  "auc": 0.9544214332675871,
+  "f1": 0.9117291414752116,
+  "ece_before": 0.1733698711032048,
+  "ece_after": 0.10595431667006308,
+  "brier": 0.10595170546749241,
+  "avg_trust_score": 0.9943186640739441,
+  "temperature": 0.7803493142127991,
+  "decision_threshold": 0.69,
   "best_val_f1": 0.8888888888888888,
+  "best_val_sensitivity": 0.9999999987499999,
+  "threshold_target_sensitivity": 0.95,
+  "threshold_target_met": true,
+  "learned_trust_weights": {
+    "uncertainty": 0.05000000074505806,
+    "ece": 0.949999988079071,
+    "disagreement": 0.0,
+    "confidence": 0.0
+  },
+  "trust_weight_learning_auc": 0.9642857142857143,
+  "trust_weight_step": 0.05,
+  "trust_normalization_stats": {
+    "uncertainty": {
+      "min": 6.178480838059386e-09,
+      "max": 0.007432466372847557
+    },
+    "disagreement": {
+      "min": 5.991316331943608e-09,
+      "max": 0.10351797938346863
+    },
+    "confidence": {
+      "min": 0.0008418541983701289,
+      "max": 0.9999867677688599
+    },
+    "ece": {
+      "min": 0.11753453314304352,
+      "max": 0.11753453314304352
+    }
+  },
+  "manual_trust_weights": {
+    "uncertainty": 0.3,
+    "ece": 0.2,
+    "disagreement": 0.2,
+    "confidence": 0.3
+  },
+  "learn_trust_weights_enabled": true,
   "class_names": [
     "NORMAL",
     "PNEUMONIA"
   ],
-  "best_model_path": "./artifacts/best_model.pt",
+  "best_model_path": "/Users/kishores/Documents/research day/artifacts/best_model.pt",
   "ensemble_model_paths": [
-    "./artifacts/ensemble_model_seed_42.pt",
-    "./artifacts/ensemble_model_seed_123.pt",
-    "./artifacts/ensemble_model_seed_999.pt"
+    "/Users/kishores/Documents/research day/artifacts/ensemble_model_seed_42.pt",
+    "/Users/kishores/Documents/research day/artifacts/ensemble_model_seed_123.pt",
+    "/Users/kishores/Documents/research day/artifacts/ensemble_model_seed_999.pt"
   ]
 }

@@ -14,12 +14,19 @@ from tqdm import tqdm
 from calibration import apply_temperature, expected_calibration_error, fit_temperature, plot_reliability_diagram
 from ensemble import collect_ensemble_probabilities, disagreement_from_ensemble_probs
 from models import MCDropoutResNet18, load_checkpoint, save_checkpoint
-from trust_metrics import classify_trust_levels, compute_ensemble_disagreement, compute_trust_score
+from trust_metrics import (
+    build_normalization_stats,
+    classify_trust_levels,
+    compute_ensemble_disagreement,
+    compute_trust_score,
+    learn_trust_weights,
+)
 from utils import (
     binary_classification_metrics,
     get_dataloaders,
     get_device,
-    optimize_binary_threshold,
+    optimize_threshold_with_sensitivity,
+    plot_confusion_matrix,
     plot_distribution,
     plot_roc,
     save_json,
@@ -237,7 +244,11 @@ def main(args):
 
     scaled_val_logits = apply_temperature(val_logits, temperature)
     scaled_val_probs = F.softmax(scaled_val_logits, dim=1)[:, 1].detach().cpu().numpy()
-    best_threshold, best_val_f1 = optimize_binary_threshold(val_labels, scaled_val_probs)
+    best_threshold, best_val_f1, best_val_sensitivity, threshold_target_met = optimize_threshold_with_sensitivity(
+        val_labels,
+        scaled_val_probs,
+        target_sensitivity=args.target_sensitivity,
+    )
 
     ece_after = expected_calibration_error(scaled_test_probs, test_labels, n_bins=args.ece_bins)
 
@@ -272,19 +283,51 @@ def main(args):
     ensemble_probs, _ = collect_ensemble_probabilities(ensemble_models, test_loader, device)
     disagreement = disagreement_from_ensemble_probs(ensemble_probs)
 
+    val_ensemble_probs, _ = collect_ensemble_probabilities(ensemble_models, val_loader, device)
+    val_disagreement = disagreement_from_ensemble_probs(val_ensemble_probs)
+
     # Keep a named alias consistent with requirement text
     _ = compute_ensemble_disagreement(ensemble_probs)
 
-    # 5-6) Clinical risk weighting + final trust score
-    confidence = scaled_test_probs
-    pred_labels = (scaled_test_probs >= best_threshold).astype(int)
+    # 5) Validation-side reliability factors for trust-weight learning
+    val_confidence = scaled_val_probs
+    val_pred_labels = (scaled_val_probs >= best_threshold).astype(int)
+    val_mc_mean_probs, val_mc_uncertainty, _, _ = mc_dropout_predict(model, val_loader, device, passes=30)
+    _ = val_mc_mean_probs
+    ece_val_after = expected_calibration_error(scaled_val_probs, val_labels, n_bins=args.ece_bins)
 
-    weights = {
+    risk_weights = {"normal": 1.0, "pneumonia": 1.5}
+    trust_norm_stats = build_normalization_stats(
+        uncertainty=val_mc_uncertainty,
+        ece=ece_val_after,
+        disagreement=val_disagreement,
+        confidence=val_confidence,
+    )
+
+    default_weights = {
         "uncertainty": args.w1,
         "ece": args.w2,
         "disagreement": args.w3,
         "confidence": args.w4,
     }
+    learned_weights, trust_weight_auc = learn_trust_weights(
+        uncertainty=val_mc_uncertainty,
+        ece=ece_val_after,
+        disagreement=val_disagreement,
+        confidence=val_confidence,
+        pred_labels=val_pred_labels,
+        true_labels=val_labels,
+        class_names=class_names,
+        risk_weights=risk_weights,
+        normalization_stats=trust_norm_stats,
+        step=args.trust_weight_step,
+    )
+
+    selected_weights = learned_weights if args.learn_trust_weights else default_weights
+
+    # 6) Clinical risk weighting + final trust score
+    confidence = scaled_test_probs
+    pred_labels = (scaled_test_probs >= best_threshold).astype(int)
 
     trust_scores = compute_trust_score(
         uncertainty=mc_uncertainty,
@@ -293,8 +336,9 @@ def main(args):
         confidence=confidence,
         pred_labels=pred_labels,
         class_names=class_names,
-        weights=weights,
-        risk_weights={"normal": 1.0, "pneumonia": 1.5},
+        weights=selected_weights,
+        risk_weights=risk_weights,
+        normalization_stats=trust_norm_stats,
     )
 
     trust_levels = classify_trust_levels(
@@ -320,6 +364,13 @@ def main(args):
         save_path=os.path.join(figures_dir, "trust_distribution.png"),
     )
     plot_roc(test_labels, scaled_test_probs, save_path=os.path.join(figures_dir, "roc_curve.png"))
+    plot_confusion_matrix(
+        y_true=test_labels,
+        y_pred=pred_labels,
+        class_names=class_names,
+        save_path=os.path.join(figures_dir, "confusion_matrix.png"),
+        title="Confusion Matrix (Thresholded Predictions)",
+    )
 
     # Save per-sample trust analysis table
     report_df = pd.DataFrame(
@@ -349,9 +400,19 @@ def main(args):
         "temperature": float(temperature),
         "decision_threshold": float(best_threshold),
         "best_val_f1": float(best_val_f1),
+        "best_val_sensitivity": float(best_val_sensitivity),
+        "threshold_target_sensitivity": float(args.target_sensitivity),
+        "threshold_target_met": bool(threshold_target_met),
+        "learned_trust_weights": selected_weights,
+        "trust_weight_learning_auc": float(trust_weight_auc) if not np.isnan(trust_weight_auc) else None,
+        "trust_weight_step": float(args.trust_weight_step),
+        "trust_normalization_stats": trust_norm_stats,
+        "manual_trust_weights": default_weights,
+        "learn_trust_weights_enabled": bool(args.learn_trust_weights),
         "class_names": class_names,
         "best_model_path": best_model_path,
         "ensemble_model_paths": ensemble_paths,
+        "confusion_matrix_path": os.path.join(figures_dir, "confusion_matrix.png"),
     }
 
     summary_path = os.path.join(args.output_dir, "research_summary.json")
@@ -366,6 +427,8 @@ def main(args):
     print(f"Brier score         : {final_metrics['brier']:.4f}")
     print(f"Average trust score : {final_metrics['avg_trust_score']:.4f}")
     print(f"Decision threshold  : {final_metrics['decision_threshold']:.2f}")
+    print(f"Val sensitivity     : {final_metrics['best_val_sensitivity']:.4f}")
+    print(f"Trust weights       : {final_metrics['learned_trust_weights']}")
     print(f"Saved summary to    : {summary_path}")
     print(f"Saved report to     : {report_csv}")
     print(f"Saved figures in    : {figures_dir}")
@@ -393,10 +456,14 @@ if __name__ == "__main__":
 
     # Calibration and trust
     parser.add_argument("--ece_bins", type=int, default=15)
+    parser.add_argument("--target_sensitivity", type=float, default=0.95)
     parser.add_argument("--w1", type=float, default=0.30, help="Weight for uncertainty")
     parser.add_argument("--w2", type=float, default=0.20, help="Weight for ECE")
     parser.add_argument("--w3", type=float, default=0.20, help="Weight for disagreement")
     parser.add_argument("--w4", type=float, default=0.30, help="Weight for confidence")
+    parser.add_argument("--trust_weight_step", type=float, default=0.05)
+    parser.add_argument("--learn_trust_weights", action="store_true", default=True)
+    parser.add_argument("--no_learn_trust_weights", action="store_false", dest="learn_trust_weights")
     parser.add_argument("--reliable_threshold", type=float, default=0.72)
     parser.add_argument("--review_threshold", type=float, default=0.50)
     parser.add_argument("--high_risk_margin", type=float, default=0.08)

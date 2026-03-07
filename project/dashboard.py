@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 
 import numpy as np
-import plotly.graph_objects as go
 import matplotlib.cm as cm
 import streamlit as st
 import torch
@@ -12,7 +11,6 @@ from PIL import Image
 
 from calibration import apply_temperature
 from models import MCDropoutResNet18, enable_mc_dropout, load_checkpoint
-from trust_metrics import classify_trust_levels, compute_trust_score
 from utils import GradCAM, get_device, overlay_heatmap_on_image, preprocess_pil_image
 
 
@@ -20,6 +18,58 @@ from utils import GradCAM, get_device, overlay_heatmap_on_image, preprocess_pil_
 # Streamlit App Setup
 # ------------------------------
 st.set_page_config(page_title="Medical Image Trust Dashboard", layout="wide")
+
+st.markdown(
+    """
+    <style>
+        .stApp {
+            background: linear-gradient(180deg, #f8fbff 0%, #eef6ff 100%);
+            color: #0f172a;
+        }
+
+        .main .block-container {
+            padding-top: 1.2rem;
+            padding-bottom: 1.2rem;
+        }
+
+        h1, h2, h3 {
+            color: #0b3b8f !important;
+            letter-spacing: 0.2px;
+        }
+
+        .stCaption {
+            color: #334155 !important;
+            font-weight: 500;
+        }
+
+        [data-testid="stSidebar"] {
+            background: #eaf2ff;
+        }
+
+        [data-testid="stMetric"] {
+            background: #ffffff;
+            border: 1px solid #dbeafe;
+            border-radius: 12px;
+            padding: 10px 12px;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+        }
+
+        [data-testid="stImage"] img {
+            border-radius: 12px;
+            border: 1px solid #dbeafe;
+        }
+
+        [data-testid="stFileUploader"] {
+            background: #ffffff;
+            border: 1px solid #bfdbfe;
+            border-radius: 12px;
+            padding: 10px;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("Quantifying Reliability in Medical Image Classification")
 st.caption("MC Dropout + Calibration + Ensemble Disagreement + Clinical Risk Weighting")
 
@@ -126,25 +176,65 @@ def ensemble_single(ensemble_models, x):
     return float(probs.mean()), float(probs.var())
 
 
-def trust_gauge(value: float):
-    fig = go.Figure(
-        go.Indicator(
-            mode="gauge+number",
-            value=value,
-            title={"text": "Final Trust Score"},
-            gauge={
-                "axis": {"range": [0, 1.2]},
-                "bar": {"color": "darkblue"},
-                "steps": [
-                    {"range": [0, 0.5], "color": "#ffcccc"},
-                    {"range": [0.5, 0.75], "color": "#fff3cd"},
-                    {"range": [0.75, 1.2], "color": "#d4edda"},
-                ],
-            },
-        )
+def compute_model_quality_score(summary: dict) -> float:
+    """Compute model-level quality score in [0, 100] from summary metrics."""
+    acc = float(summary.get("accuracy", 0.0))
+    auc = float(summary.get("auc", 0.0))
+    f1 = float(summary.get("f1", 0.0))
+    ece_after = float(summary.get("ece_after", 1.0))
+
+    score_01 = (
+        0.35 * auc
+        + 0.30 * f1
+        + 0.20 * acc
+        + 0.15 * max(0.0, 1.0 - ece_after)
     )
-    fig.update_layout(height=320, margin=dict(l=10, r=10, t=60, b=10))
-    return fig
+    return float(np.clip(score_01 * 100.0, 0.0, 100.0))
+
+
+def compute_case_reliability_score(
+    confidence: float,
+    uncertainty: float,
+    ece_value: float,
+    disagreement: float,
+    weights: dict[str, float],
+) -> float:
+    """Compute case-level reliability score in [0, 100] without trust-score dependency."""
+    uncertainty_term = 1.0 / (1.0 + 50.0 * max(0.0, uncertainty))
+    disagreement_term = 1.0 / (1.0 + 20.0 * max(0.0, disagreement))
+    ece_term = max(0.0, 1.0 - max(0.0, min(1.0, ece_value)))
+    confidence_term = max(0.0, min(1.0, confidence))
+
+    w1 = float(weights.get("uncertainty", 0.30))
+    w2 = float(weights.get("ece", 0.20))
+    w3 = float(weights.get("disagreement", 0.20))
+    w4 = float(weights.get("confidence", 0.30))
+    denom = max(w1 + w2 + w3 + w4, 1e-8)
+
+    score_01 = (
+        w1 * uncertainty_term
+        + w2 * ece_term
+        + w3 * disagreement_term
+        + w4 * confidence_term
+    ) / denom
+    return float(np.clip(score_01 * 100.0, 0.0, 100.0))
+
+
+def compute_final_overall_score(summary: dict, case_reliability_score: float) -> float:
+    """Combine model-level quality and case-level reliability into one final score in [0, 100]."""
+    model_quality = compute_model_quality_score(summary)
+    final_score = 0.4 * model_quality + 0.6 * case_reliability_score
+    return float(np.clip(final_score, 0.0, 100.0))
+
+
+def final_score_label(score: float) -> str:
+    if score >= 85:
+        return "Excellent"
+    if score >= 70:
+        return "Good"
+    if score >= 55:
+        return "Moderate"
+    return "Needs Review"
 
 
 # ------------------------------
@@ -186,23 +276,16 @@ if uploaded is not None and all(Path(p).exists() for p in required_files):
     # Ensemble disagreement
     ensemble_mean, ensemble_disagreement = ensemble_single(ensemble_models, x)
 
-    # Trust score
-    trust_score = compute_trust_score(
-        uncertainty=np.array([mc_uncertainty]),
-        ece=ece_value,
-        disagreement=np.array([ensemble_disagreement]),
-        confidence=np.array([confidence]),
-        pred_labels=np.array([pred_idx]),
-        class_names=class_names,
+    case_reliability_score = compute_case_reliability_score(
+        confidence=confidence,
+        uncertainty=mc_uncertainty,
+        ece_value=ece_value,
+        disagreement=ensemble_disagreement,
         weights={"uncertainty": w1, "ece": w2, "disagreement": w3, "confidence": w4},
-        risk_weights={"normal": 1.0, "pneumonia": 1.5},
-    )[0]
+    )
 
-    trust_level = classify_trust_levels(
-        trust_scores=np.array([trust_score]),
-        pred_labels=np.array([pred_idx]),
-        class_names=class_names,
-    )[0]
+    final_overall_score = compute_final_overall_score(summary, case_reliability_score)
+    final_overall_label = final_score_label(final_overall_score)
 
     # Grad-CAM
     cam_extractor = GradCAM(base_model, base_model.backbone.layer3[-1].conv2)
@@ -229,15 +312,14 @@ if uploaded is not None and all(Path(p).exists() for p in required_files):
 
     with col2:
         st.subheader("Prediction and Reliability")
+        st.metric("Final Overall Score", f"{final_overall_score:.1f}/100", delta=final_overall_label)
         st.markdown(f"**Prediction:** {pred_class}")
         st.markdown(f"**Decision Threshold (Pneumonia):** {decision_threshold:.2f}")
         st.markdown(f"**Confidence:** {confidence:.4f}")
         st.markdown(f"**MC Uncertainty (Variance):** {mc_uncertainty:.6f}")
         st.markdown(f"**ECE (Calibrated):** {ece_value:.6f}")
         st.markdown(f"**Ensemble Disagreement:** {ensemble_disagreement:.6f}")
-        st.markdown(f"**Trust Category:** {trust_level}")
-
-        st.plotly_chart(trust_gauge(float(trust_score)), use_container_width=True)
+        st.markdown(f"**Case Reliability Score:** {case_reliability_score:.1f}/100")
 
     st.divider()
     st.subheader("Auxiliary Estimates")

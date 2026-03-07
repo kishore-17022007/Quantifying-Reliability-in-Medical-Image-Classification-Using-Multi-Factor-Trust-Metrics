@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_auc_score
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
@@ -180,6 +180,47 @@ def optimize_binary_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> tuple[f
     return best_threshold, best_f1
 
 
+def optimize_threshold_with_sensitivity(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    target_sensitivity: float = 0.95,
+) -> tuple[float, float, float, bool]:
+    """Optimize threshold under a sensitivity target for the positive class.
+
+    Returns:
+        best_threshold, best_f1, achieved_sensitivity, target_met
+    """
+    y_true = np.asarray(y_true).astype(int)
+    y_prob = np.asarray(y_prob).astype(float)
+
+    thresholds = np.linspace(0.05, 0.95, 91)
+    best_threshold = 0.5
+    best_f1 = -1.0
+    best_sensitivity = 0.0
+    target_met = False
+
+    for threshold in thresholds:
+        y_pred = (y_prob >= threshold).astype(int)
+        tp = float(np.sum((y_pred == 1) & (y_true == 1)))
+        fn = float(np.sum((y_pred == 0) & (y_true == 1)))
+        sensitivity = tp / (tp + fn + 1e-8)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+
+        if sensitivity >= target_sensitivity:
+            if (not target_met) or (f1 > best_f1) or (f1 == best_f1 and threshold > best_threshold):
+                target_met = True
+                best_threshold = float(threshold)
+                best_f1 = float(f1)
+                best_sensitivity = float(sensitivity)
+        elif not target_met:
+            if (f1 > best_f1) or (f1 == best_f1 and sensitivity > best_sensitivity):
+                best_threshold = float(threshold)
+                best_f1 = float(f1)
+                best_sensitivity = float(sensitivity)
+
+    return best_threshold, best_f1, best_sensitivity, target_met
+
+
 def save_json(data: dict, path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -215,6 +256,46 @@ def plot_roc(y_true: np.ndarray, y_prob: np.ndarray, save_path: str) -> None:
     plt.title("ROC Curve")
     plt.legend()
     plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+
+
+def plot_confusion_matrix(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    class_names: list[str],
+    save_path: str,
+    title: str = "Confusion Matrix",
+) -> None:
+    """Plot and save confusion matrix for binary or multiclass predictions."""
+    y_true = np.asarray(y_true).astype(int)
+    y_pred = np.asarray(y_pred).astype(int)
+
+    cm = confusion_matrix(y_true, y_pred, labels=np.arange(len(class_names)))
+
+    plt.figure(figsize=(6, 5))
+    plt.imshow(cm, interpolation="nearest", cmap="Blues")
+    plt.title(title)
+    plt.colorbar()
+
+    tick_marks = np.arange(len(class_names))
+    plt.xticks(tick_marks, class_names, rotation=30, ha="right")
+    plt.yticks(tick_marks, class_names)
+    plt.ylabel("True Label")
+    plt.xlabel("Predicted Label")
+
+    threshold = cm.max() / 2.0 if cm.size > 0 else 0.0
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            plt.text(
+                j,
+                i,
+                f"{cm[i, j]}",
+                horizontalalignment="center",
+                color="white" if cm[i, j] > threshold else "black",
+            )
+
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
     plt.close()
